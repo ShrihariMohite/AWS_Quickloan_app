@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Creates a VPC, 3 public subnets, route to IGW, security group, and an EC2 instance.
+  Fixes: proper SG egress, true booleans, public IP assignment, and optional SSM AMI.
+
+Parameters:
+  VPCCIDRBlock:
+    Type: String
+    Default: '172.20.0.0/16'
+    Description: CIDR block for the VPC.
+  Subnet1CIDRBlock:
+    Type: String
+    Default: '172.20.1.0/24'
+    Description: CIDR block for the first subnet.
+  Subnet2CIDRBlock:
+    Type: String
+    Default: '172.20.2.0/24'
+    Description: CIDR block for the second subnet.
+  Subnet3CIDRBlock:
+    Type: String
+    Default: '172.20.3.0/24'
+    Description: CIDR block for the third subnet.
+  InstanceType:
+    Type: String
+    Default: 't2.small'
+    Description: EC2 instance type.
+  UseSsmAmi:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Set to 'true' to use the latest Amazon Linux 2023 AMI via SSM instead of CustomAmiId.
+  CustomAmiId:
+    Type: String
+    Default: 'ami-00ca570c1b6d79f36'
+    Description: Specific AMI ID to use (must exist in the target region).
+  # Region-safe AL2023 AMI via SSM (used when UseSsmAmi = true)
+  Al2023AmiParameter:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+    Description: SSM Parameter for latest AL2023 AMI.
+
+Conditions:
+  UseSsmAmiCond: !Equals [ !Ref UseSsmAmi, 'true' ]
+
+Resources:
+  # ---------------------------
+  # VPC
+  # ---------------------------
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCIDRBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  # ---------------------------
+  # Internet Gateway + Attach
+  # ---------------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyInternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ---------------------------
+  # Public Subnets (3 AZs)
+  # ---------------------------
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref Subnet1CIDRBlock
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Subnet1-AZ1
+
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref Subnet2CIDRBlock
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Subnet2-AZ2
+
+  Subnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref Subnet3CIDRBlock
+      AvailabilityZone: !Select [ 2, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Subnet3-AZ3
+
+  # ---------------------------
+  # Public Route Table + Route
+  # ---------------------------
+  CustomRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: CustomPublicRouteTable
+
+  RouteToInternet:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref CustomRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+    DependsOn: AttachGateway
+
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet1
+      RouteTableId: !Ref CustomRouteTable
+
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref CustomRouteTable
+
+  Subnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet3
+      RouteTableId: !Ref CustomRouteTable
+
+  # ---------------------------
+  # Security Group (SSH + HTTP | All egress)
+  # ---------------------------
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MyVPC
+      GroupDescription: Allow SSH(22), HTTP(80); allow all egress
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0  # Consider restricting to your IP range in production
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: InstanceSecurityGroup
+
+  # ---------------------------
+  # EC2 Instance
+  # ---------------------------
+  VM1Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !If [ UseSsmAmiCond, !Ref Al2023AmiParameter, !Ref CustomAmiId ]
+      SubnetId: !Ref Subnet1
+      KeyName: awskey
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: VM1
+      # If you prefer forcing public IP at NIC level instead of subnet-level:
+      # NetworkInterfaces:
+      #   - DeviceIndex: 0
+      #     SubnetId: !Ref Subnet1
+      #     AssociatePublicIpAddress: true
+      #     GroupSet: [ !Ref InstanceSecurityGroup ]
+
+Outputs:
+  VPCId:
+    Description: The ID of the created VPC.
+    Value: !Ref MyVPC
+
+  VPCCidrBlock:
+    Description: The CIDR block of the created VPC.
+    Value: !Ref VPCCIDRBlock
+
+  Subnet1Id:
+    Description: The ID of the first subnet.
+    Value: !Ref Subnet1
+
+  Subnet2Id:
+    Description: The ID of the second subnet.
+    Value: !Ref Subnet2
+
+  Subnet3Id:
+    Description: The ID of the third subnet.
+    Value: !Ref Subnet3
+
+  EC2InstanceId:
+    Description: The ID of the EC2 instance.
+    Value: !Ref VM1Instance
+
+  EC2PublicIp:
+    Description: The public IP address of the EC2 instance (will be blank if no public IP assigned).
+    Value: !GetAtt VM1Instance.PublicIp
+
+  SecurityGroupId:
+    Description: The ID of the security group.
+    Value: !Ref InstanceSecurityGroup

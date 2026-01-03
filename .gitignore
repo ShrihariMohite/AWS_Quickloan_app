@@ -1,0 +1,12 @@
+# OS / editor
+.vscode/
+.DS_Store
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+
+# Temporary files
+output screen/
